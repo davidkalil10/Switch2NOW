@@ -19,7 +19,8 @@ in mediump vec2 tex_position;
 out vec4 FragColor;
 
 void main() {
-    vec2 uv = (tex_position - uv_data.xy) * uv_data.zw;
+    // uv_data = (u0, v0, width, height): a direct source-rectangle window.
+    vec2 uv = uv_data.xy + tex_position * uv_data.zw;
     vec3 YCbCr = vec3(texture(plane0, uv).r, texture(plane1, uv).r, texture(plane1, uv).g) - offset;
     FragColor = vec4(clamp(yuvmat * YCbCr, 0.0, 1.0), 1.0);
 }
@@ -37,7 +38,8 @@ in mediump vec2 tex_position;
 out vec4 FragColor;
 
 void main() {
-    vec2 uv = (tex_position - uv_data.xy) * uv_data.zw;
+    // uv_data = (u0, v0, width, height): a direct source-rectangle window.
+    vec2 uv = uv_data.xy + tex_position * uv_data.zw;
     vec3 YCbCr = vec3(texture(plane0, uv).r, texture(plane1, uv).r, texture(plane2, uv).r) - offset;
     FragColor = vec4(clamp(yuvmat * YCbCr, 0.0, 1.0), 1.0);
 }
@@ -63,7 +65,8 @@ in highp vec2 tex_position;
 out mediump vec4 fragmentColor;
 
 void main() {
-    highp vec2 uv = (tex_position - uv_data.xy) * uv_data.zw;
+    // uv_data = (u0, v0, width, height): a direct source-rectangle window.
+    highp vec2 uv = uv_data.xy + tex_position * uv_data.zw;
     highp vec3 YCbCr = vec3(texture(plane0, uv).r, texture(plane1, uv).r, texture(plane1, uv).g) - offset;
     fragmentColor = vec4(clamp(yuvmat * YCbCr, 0.0, 1.0), 1.0);
 }
@@ -80,7 +83,8 @@ in highp vec2 tex_position;
 out mediump vec4 fragmentColor;
 
 void main() {
-    highp vec2 uv = (tex_position - uv_data.xy) * uv_data.zw;
+    // uv_data = (u0, v0, width, height): a direct source-rectangle window.
+    highp vec2 uv = uv_data.xy + tex_position * uv_data.zw;
     highp vec3 YCbCr = vec3(texture(plane0, uv).r, texture(plane1, uv).r, texture(plane2, uv).r) - offset;
     fragmentColor = vec4(clamp(yuvmat * YCbCr, 0.0, 1.0), 1.0);
 }

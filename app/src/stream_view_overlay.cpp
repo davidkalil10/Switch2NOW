@@ -4,6 +4,7 @@
 #include "network_utils.hpp"
 #include "stream_diagnostics.hpp"
 #include "stream_settings.hpp"
+#include "stream/video_display_mode.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -354,6 +355,9 @@ void StreamView::SetStreamOverlayVisible(bool visible)
     stream_overlay_a_was_down_ = false;
     stream_overlay_up_was_down_ = false;
     stream_overlay_down_was_down_ = false;
+    stream_overlay_left_was_down_ = false;
+    stream_overlay_right_was_down_ = false;
+    stream_overlay_display_submenu_ = false;
     ResetControllerDeliveryState();
 
     if (touch_was_down_ && session_)
@@ -401,11 +405,21 @@ void StreamView::ActivateStreamOverlayAction(
             if (session_)
                 session_->record_ui_event("overlay network information refreshed");
             break;
+        case opennow::input::OverlayAction::DisplayMode:
+            display_mode_selection_ =
+                opennow::video_display::g_mode.load(std::memory_order_relaxed);
+            stream_overlay_display_submenu_ = true;
+            if (session_)
+                session_->record_ui_event("overlay display mode menu opened");
+            break;
         case opennow::input::OverlayAction::Close:
             SetStreamOverlayVisible(false);
             break;
         case opennow::input::OverlayAction::ExitStream:
             ExitStream();
+            break;
+        case opennow::input::OverlayAction::ExitHbmenu:
+            ExitToHbmenu();
             break;
     }
 }
@@ -765,19 +779,11 @@ void StreamView::DrawStreamOverlay(
         right_y += warning_height + 13.0f;
     }
 
-    const std::array<std::string, opennow::input::kOverlayActionCount> action_labels = {
-        stats_overlay_enabled_
-            ? opennow::Tr("Hide performance statistics")
-            : opennow::Tr("Show performance statistics"),
-        opennow::Tr("Refresh network information"),
-        opennow::Tr("Close menu"),
-        opennow::Tr("Exit stream"),
-    };
-    for (std::size_t index = 0; index < action_labels.size(); ++index)
-    {
-        const bool selected = index == stream_overlay_selection_;
+    const float action_step = 36.0f;
+    auto draw_action_row = [vg, right_x, right_edge, action_step](
+        float& row_y, const std::string& label, bool selected, bool applied) {
         nvgBeginPath(vg);
-        nvgRoundedRect(vg, right_x, right_y, right_edge - right_x, 34.0f, 8.0f);
+        nvgRoundedRect(vg, right_x, row_y, right_edge - right_x, 32.0f, 8.0f);
         nvgFillColor(vg, selected
             ? nvgRGBA(77, 218, 130, 30)
             : nvgRGBA(27, 33, 37, 220));
@@ -792,11 +798,44 @@ void StreamView::DrawStreamOverlay(
         nvgFillColor(vg, selected
             ? nvgRGB(128, 238, 168)
             : nvgRGB(220, 228, 224));
-        const std::string row = selected
-            ? "A   " + action_labels[index]
-            : "    " + action_labels[index];
-        nvgText(vg, right_x + 13.0f, right_y + 17.0f, row.c_str(), nullptr);
-        right_y += 40.0f;
+        std::string row = selected ? "A   " : "    ";
+        row += label;
+        if (applied)
+            row += "  *";
+        nvgText(vg, right_x + 13.0f, row_y + 16.0f, row.c_str(), nullptr);
+        row_y += action_step;
+    };
+
+    if (stream_overlay_display_submenu_)
+    {
+        const int applied_mode =
+            opennow::video_display::g_mode.load(std::memory_order_relaxed);
+        for (int index = 0; index < opennow::video_display::kModeCount; ++index)
+            draw_action_row(right_y,
+                opennow::video_display::modeLabel(index),
+                index == display_mode_selection_, index == applied_mode);
+        right_y += 4.0f;
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvgFontSize(vg, 12.0f);
+        nvgFillColor(vg, nvgRGB(150, 205, 175));
+        nvgText(vg, right_x, right_y,
+            opennow::Tr("A apply  /  B back  /  D-pad select").c_str(), nullptr);
+    }
+    else
+    {
+        const std::array<std::string, opennow::input::kOverlayActionCount> action_labels = {
+            stats_overlay_enabled_
+                ? opennow::Tr("Hide performance statistics")
+                : opennow::Tr("Show performance statistics"),
+            opennow::Tr("Refresh network information"),
+            opennow::Tr("Display mode  >"),
+            opennow::Tr("Close menu"),
+            opennow::Tr("Exit stream"),
+            opennow::Tr("Exit to hbmenu (quit app)"),
+        };
+        for (std::size_t index = 0; index < action_labels.size(); ++index)
+            draw_action_row(right_y, action_labels[index],
+                            index == stream_overlay_selection_, false);
     }
 
     if (!stream_overlay_status_.empty() && now < stream_overlay_status_until_)
@@ -806,50 +845,58 @@ void StreamView::DrawStreamOverlay(
         nvgFillColor(vg, nvgRGB(114, 232, 157));
         nvgText(vg, right_x, right_y + 7.0f,
                 stream_overlay_status_.c_str(), nullptr);
+        right_y += 24.0f;
     }
-    right_y += 24.0f;
+    right_y += 6.0f;
 
-    nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-    nvgFontSize(vg, 13.0f);
-    nvgFillColor(vg, nvgRGB(172, 183, 187));
-    const std::string shortcuts = opennow::Tr("CONTROLLER SHORTCUTS");
-    nvgText(vg, right_x, right_y, shortcuts.c_str(), nullptr);
-    right_y += 23.0f;
-
-    auto draw_shortcut = [vg, right_x](
-                             float& row_y, const char* keys, const char* action,
-                             bool emphasized = false) {
-        const float key_width = 132.0f;
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, right_x, row_y, key_width, 30.0f, 7.0f);
-        nvgFillColor(vg, emphasized
-            ? nvgRGBA(77, 218, 130, 22)
-            : nvgRGBA(31, 38, 42, 230));
-        nvgFill(vg);
-        nvgStrokeWidth(vg, 1.0f);
-        nvgStrokeColor(vg, emphasized
-            ? nvgRGBA(77, 218, 130, 85)
-            : nvgRGBA(140, 154, 161, 65));
-        nvgStroke(vg);
-        nvgFontSize(vg, 12.0f);
-        nvgFillColor(vg, emphasized
-            ? nvgRGB(122, 235, 164)
-            : nvgRGB(231, 237, 233));
-        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-        nvgText(vg, right_x + key_width * 0.5f, row_y + 15.0f, keys, nullptr);
+    // The Wi-Fi warning and the extra display/exit actions can fill this
+    // column. Keep the shortcut legend only while it fits above the footer.
+    const float footer_top = panel_y + panel_height - 40.0f;
+    if (right_y + 23.0f + 6.0f * 32.0f <= footer_top)
+    {
         nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
         nvgFontSize(vg, 13.0f);
-        nvgFillColor(vg, nvgRGB(188, 198, 202));
-        nvgText(vg, right_x + key_width + 15.0f, row_y + 15.0f, action, nullptr);
-        row_y += 36.0f;
-    };
+        nvgFillColor(vg, nvgRGB(172, 183, 187));
+        const std::string shortcuts = opennow::Tr("CONTROLLER SHORTCUTS");
+        nvgText(vg, right_x, right_y, shortcuts.c_str(), nullptr);
+        right_y += 23.0f;
 
-    draw_shortcut(right_y, "MINUS  +  PLUS", opennow::Tr("Open or close menu").c_str(), true);
-    draw_shortcut(right_y, "MINUS + R3", opennow::Tr("Hold 0.3s; release allowed").c_str());
-    draw_shortcut(right_y, "ZL / L / R / ZR", "Esc / Tab / Alt+Tab / Win");
-    draw_shortcut(right_y, AutoLoginAvailable()?"Y / X":"Y",
-        opennow::Tr(AutoLoginAvailable()?"Keyboard / auto-login":"On-screen keyboard").c_str());
-    draw_shortcut(right_y, "ZL + ZR + MINUS", opennow::Tr("Exit stream").c_str());
+        auto draw_shortcut = [vg, right_x](
+                                 float& row_y, const char* keys, const char* action,
+                                 bool emphasized = false) {
+            const float key_width = 132.0f;
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, right_x, row_y, key_width, 28.0f, 7.0f);
+            nvgFillColor(vg, emphasized
+                ? nvgRGBA(77, 218, 130, 22)
+                : nvgRGBA(31, 38, 42, 230));
+            nvgFill(vg);
+            nvgStrokeWidth(vg, 1.0f);
+            nvgStrokeColor(vg, emphasized
+                ? nvgRGBA(77, 218, 130, 85)
+                : nvgRGBA(140, 154, 161, 65));
+            nvgStroke(vg);
+            nvgFontSize(vg, 12.0f);
+            nvgFillColor(vg, emphasized
+                ? nvgRGB(122, 235, 164)
+                : nvgRGB(231, 237, 233));
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgText(vg, right_x + key_width * 0.5f, row_y + 14.0f, keys, nullptr);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+            nvgFontSize(vg, 13.0f);
+            nvgFillColor(vg, nvgRGB(188, 198, 202));
+            nvgText(vg, right_x + key_width + 15.0f, row_y + 14.0f, action, nullptr);
+            row_y += 32.0f;
+        };
+
+        draw_shortcut(right_y, "MINUS  +  PLUS", opennow::Tr("Open or close menu").c_str(), true);
+        draw_shortcut(right_y, "MINUS + R3", opennow::Tr("Hold 0.3s; release allowed").c_str());
+        draw_shortcut(right_y, "ZL / L / R / ZR", "Esc / Tab / Alt+Tab / Win");
+        draw_shortcut(right_y, AutoLoginAvailable()?"Y / X":"Y",
+            opennow::Tr(AutoLoginAvailable()?"Keyboard / auto-login":"On-screen keyboard").c_str());
+        draw_shortcut(right_y, "ZL + ZR + MINUS", opennow::Tr("Exit stream").c_str());
+        draw_shortcut(right_y, "L + R", opennow::Tr("Quit to hbmenu").c_str(), true);
+    }
 
     nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
     nvgFontSize(vg, 12.0f);

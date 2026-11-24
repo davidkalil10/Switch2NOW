@@ -31,11 +31,13 @@ enum class OverlayAction : std::size_t
 {
     ToggleStatistics = 0,
     RefreshNetwork = 1,
-    Close = 2,
-    ExitStream = 3,
+    DisplayMode = 2,
+    Close = 3,
+    ExitStream = 4,
+    ExitHbmenu = 5,
 };
 
-constexpr std::size_t kOverlayActionCount = 4;
+constexpr std::size_t kOverlayActionCount = 6;
 
 constexpr std::size_t MoveOverlaySelection(
     std::size_t current, int direction)

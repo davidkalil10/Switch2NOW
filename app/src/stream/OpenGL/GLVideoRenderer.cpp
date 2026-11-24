@@ -10,9 +10,22 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+
+#include "../video_display_mode.hpp"
+
+#if defined(__SWITCH2__)
+#include <switch.h>
+#include <EGL/egl.h>
+// Always dump the first decoded frame on Switch 2. The PPM lets us verify
+// whether the crop happens inside the decoder output or in the GL mapping.
+#if !defined(OPENNOW_ENABLE_FRAME_PROBE)
+#define OPENNOW_ENABLE_FRAME_PROBE 1
+#endif
+#endif
 
 static inline uint64_t LiGetMillis() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -146,9 +159,11 @@ static void yuv_to_rgb(const AVFrame* frame, int y, int u, int v, uint8_t& r, ui
     b = clamp_u8((298 * c + 516 * d + 128) >> 8);
 }
 
-static void dump_first_frame_probe(const AVFrame* frame) {
+static void dump_frame_probe(const AVFrame* frame, const char* path) {
+#if !defined(__SWITCH2__)
     if (!opennow::StreamDiagnosticsEnabled())
         return;
+#endif
     if (!frame || frame->width <= 0 || frame->height <= 0 || !frame->data[0])
         return;
 
@@ -157,7 +172,6 @@ static void dump_first_frame_probe(const AVFrame* frame) {
     mkdir("sdmc:/switch/SwitchNOW", 0777);
 #endif
 
-    const char* path = "sdmc:/switch/SwitchNOW/first_frame.ppm";
     FILE* out = fopen(path, "wb");
     if (!out) {
         render_diag_log("frame_probe failed_open path=%s", path);
@@ -560,18 +574,11 @@ void GLVideoRenderer::checkAndUpdateScale(int width, int height,
         glUniformMatrix3fv(m_yuvmat_location, 1, GL_FALSE,
                            gl_color_matrix(frame->colorspace, colorFull));
 
-        float frameAspect = ((float)m_frame_height / (float)m_frame_width);
-        float screenAspect = ((float)m_screen_height / (float)m_screen_width);
-
-        if (frameAspect > screenAspect) {
-            float multiplier = frameAspect / screenAspect;
-            glUniform4f(m_uv_data_location, 0.5f - 0.5f * (1.0f / multiplier),
-                        0.0f, multiplier, 1.0f);
-        } else {
-            float multiplier = screenAspect / frameAspect;
-            glUniform4f(m_uv_data_location, 0.0f,
-                        0.5f - 0.5f * (1.0f / multiplier), 1.0f, multiplier);
-        }
+        // The viewport already contains the decoded frame inside the surface.
+        // Keep the source rectangle at the full texture; the GL viewport is
+        // responsible for any letterboxing. The display-mode UV window is
+        // applied every frame from drawLatest().
+        glUniform4f(m_uv_data_location, 0.0f, 0.0f, 1.0f, 1.0f);
     }
 }
 
@@ -607,14 +614,131 @@ void GLVideoRenderer::drawLatest(NVGcontext* vg, int width, int height,
                         frame ? frame->color_range : -1,
                         frame ? frame->colorspace : -1);
     }
+#if defined(OPENNOW_ENABLE_FRAME_PROBE)
+    static std::chrono::steady_clock::time_point probe_start;
+    static bool probe_3s_done = false;
+    static bool probe_8s_done = false;
     if (!m_frame_probe_dumped) {
         m_frame_probe_dumped = true;
-#if defined(OPENNOW_ENABLE_FRAME_PROBE)
-        dump_first_frame_probe(frame);
+        probe_start = std::chrono::steady_clock::now();
+        dump_frame_probe(frame, "sdmc:/switch/SwitchNOW/first_frame.ppm");
+    } else {
+        const auto elapsed = std::chrono::steady_clock::now() - probe_start;
+        if (!probe_3s_done && elapsed >= std::chrono::seconds(3)) {
+            probe_3s_done = true;
+            dump_frame_probe(frame, "sdmc:/switch/SwitchNOW/frame_probe_3s.ppm");
+        }
+        if (!probe_8s_done && elapsed >= std::chrono::seconds(8)) {
+            probe_8s_done = true;
+            dump_frame_probe(frame, "sdmc:/switch/SwitchNOW/frame_probe_8s.ppm");
+        }
+    }
+#else
+    if (!m_frame_probe_dumped) {
+        m_frame_probe_dumped = true;
+    }
 #endif
+
+#if defined(__SWITCH2__)
+    // The logical Borealis view is 1280x720, but raw GL is not scaled by
+    // NanoVG. Use the real EGL surface as the authoritative physical size;
+    // appletGetDefaultDisplayResolution can disagree with the surface when
+    // the dock state changes without a processed resolution-change event.
+    int32_t displayWidth = 0;
+    int32_t displayHeight = 0;
+    appletGetDefaultDisplayResolution(&displayWidth, &displayHeight);
+
+    int eglWidth = 0;
+    int eglHeight = 0;
+    const EGLDisplay eglDisplay = eglGetCurrentDisplay();
+    const EGLSurface eglSurface = eglGetCurrentSurface(EGL_DRAW);
+    if (eglDisplay != EGL_NO_DISPLAY && eglSurface != EGL_NO_SURFACE)
+    {
+        eglQuerySurface(eglDisplay, eglSurface, EGL_WIDTH, &eglWidth);
+        eglQuerySurface(eglDisplay, eglSurface, EGL_HEIGHT, &eglHeight);
     }
 
-    glViewport(0, 0, width, height);
+    const int surfaceWidth = eglWidth > 0 ? eglWidth
+        : (displayWidth > 0 ? static_cast<int>(displayWidth) : brls::Application::windowWidth);
+    const int surfaceHeight = eglHeight > 0 ? eglHeight
+        : (displayHeight > 0 ? static_cast<int>(displayHeight) : brls::Application::windowHeight);
+
+    const int mode = opennow::video_display::g_mode.load(std::memory_order_relaxed);
+    const float frameAspect = frame
+        ? static_cast<float>(frame->width) / static_cast<float>(std::max(1, frame->height))
+        : 16.0f / 9.0f;
+    const float surfaceAspect = static_cast<float>(surfaceWidth) /
+        static_cast<float>(std::max(1, surfaceHeight));
+
+    int viewportX = 0;
+    int viewportY = 0;
+    int viewportWidth = surfaceWidth;
+    int viewportHeight = surfaceHeight;
+    float uvX = 0.0f;
+    float uvY = 0.0f;
+    float uvWidth = 1.0f;
+    float uvHeight = 1.0f;
+
+    if (mode == static_cast<int>(opennow::video_display::Mode::Fit))
+    {
+        // Contain: keep the complete decoded frame inside the physical screen.
+        if (frameAspect > surfaceAspect)
+        {
+            viewportHeight = std::max(1, static_cast<int>(
+                std::lround(surfaceWidth / frameAspect)));
+            viewportY = (surfaceHeight - viewportHeight) / 2;
+        }
+        else
+        {
+            viewportWidth = std::max(1, static_cast<int>(
+                std::lround(surfaceHeight * frameAspect)));
+            viewportX = (surfaceWidth - viewportWidth) / 2;
+        }
+    }
+    else if (mode == static_cast<int>(opennow::video_display::Mode::Fill))
+    {
+        // Cover: fill the screen and crop only the excess source pixels.
+        if (frameAspect > surfaceAspect)
+        {
+            uvWidth = surfaceAspect / frameAspect;
+            uvX = 0.5f - 0.5f * uvWidth;
+        }
+        else
+        {
+            uvHeight = frameAspect / surfaceAspect;
+            uvY = 0.5f - 0.5f * uvHeight;
+        }
+    }
+    // STRETCH keeps the full surface and the full 0..1 source rectangle.
+
+    glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
+
+    // One line whenever the mode changes, plus the very first frame.
+    static int loggedMode = -1;
+    if (loggedMode != mode)
+    {
+        loggedMode = mode;
+        FILE* diag = fopen("sdmc:/switch/SwitchNOW/viewport_fix.log", "a");
+        if (diag)
+        {
+            fprintf(diag,
+                    "view=%dx%d display=%dx%d egl=%dx%d viewport=%d,%d %dx%d "
+                    "mode=%d frame=%dx%d uv=%.4f,%.4f %.4fx%.4f "
+                    "linesize=%d/%d/%d\n",
+                    width, height, displayWidth, displayHeight, eglWidth, eglHeight,
+                    viewportX, viewportY, viewportWidth, viewportHeight, mode,
+                    frame ? frame->width : -1, frame ? frame->height : -1,
+                    uvX, uvY, uvWidth, uvHeight,
+                    frame ? frame->linesize[0] : 0, frame ? frame->linesize[1] : 0,
+                    frame ? frame->linesize[2] : 0);
+            fclose(diag);
+        }
+    }
+#else
+    int viewportWidth = width;
+    int viewportHeight = height;
+    glViewport(0, 0, viewportWidth, viewportHeight);
+#endif
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_STENCIL_TEST);
     glDisable(GL_DEPTH_TEST);
@@ -625,6 +749,11 @@ void GLVideoRenderer::drawLatest(NVGcontext* vg, int width, int height,
 
     glUseProgram(m_shader_program);
     checkAndUpdateScale(width, height, frame);
+#if defined(__SWITCH2__)
+    // The mode can change between frames, so refresh the UV window every
+    // frame instead of only when the frame or view size changes.
+    glUniform4f(m_uv_data_location, uvX, uvY, uvWidth, uvHeight);
+#endif
 
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -654,6 +783,11 @@ void GLVideoRenderer::drawLatest(NVGcontext* vg, int width, int height,
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+#if defined(__SWITCH2__)
+    // Return to the full surface so NanoVG overlays drawn after the video are
+    // not mapped through the fitted (possibly smaller) video viewport.
+    glViewport(0, 0, surfaceWidth, surfaceHeight);
+#endif
     m_rendered_frame_count++;
     if (!m_first_draw_logged) {
         m_first_draw_logged = true;

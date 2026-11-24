@@ -96,8 +96,12 @@ std::string BuildNvstSdp(
         "a=vqos.drc.qpMaxResThresholdAdj:4",
         "a=vqos.grc.qpMaxResThresholdAdj:4",
         "a=vqos.drc.iirFilterFactor:100",
-        "a=video.clientViewportWd:" + std::to_string(settings.width),
-        "a=video.clientViewportHt:" + std::to_string(settings.height),
+        // The remote session desktop is 1920x1080. Keep the decoded stream at
+        // the supported 1280x720 (settings.width/height and the H.264 Level 3.1
+        // answer), but advertise the real client viewport so the server scales
+        // the *complete* frame instead of taking a top-left 1280x720 crop.
+        "a=video.clientViewportWd:1920",
+        "a=video.clientViewportHt:1080",
         "a=video.maxFPS:" + std::to_string(settings.fps),
         "a=video.initialBitrateKbps:" + std::to_string(initial_bitrate),
         "a=video.initialPeakBitrateKbps:" + std::to_string(max_bitrate),

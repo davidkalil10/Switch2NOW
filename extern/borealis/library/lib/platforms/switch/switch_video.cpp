@@ -175,6 +175,25 @@ void SwitchVideoContext::beginFrame()
     {
         this->resetFramebuffer();
     }
+
+    // The GLES3 video renderer changes glViewport() while a stream is
+    // playing, so restore the real surface viewport before NanoVG draws.
+    // Query the EGL surface itself: the applet default resolution can be
+    // ahead of the actual surface after a dock/undock change, which would
+    // otherwise scale both the UI and the video beyond the screen frame.
+    int width = 0;
+    int height = 0;
+    if (this->eglDisplay != EGL_NO_DISPLAY && this->eglSurface != EGL_NO_SURFACE)
+    {
+        eglQuerySurface(this->eglDisplay, this->eglSurface, EGL_WIDTH, &width);
+        eglQuerySurface(this->eglDisplay, this->eglSurface, EGL_HEIGHT, &height);
+    }
+    if (width <= 0 || height <= 0)
+    {
+        width = static_cast<int>(roundf(this->framebufferWidth));
+        height = static_cast<int>(roundf(this->framebufferHeight));
+    }
+    glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
 }
 
 void SwitchVideoContext::endFrame()
